@@ -19,10 +19,9 @@ jobs:
 
     env:
       PROJECT_ZIP: SiteMediaScanner-iOS-v1.0.zip
-      PROJECT_DIR: build-src/SiteMediaScanner-iOS
       PROJECT_FILE: build-src/SiteMediaScanner-iOS/SiteMediaScanner.xcodeproj
       TARGET_NAME: SiteMediaScanner
-      DERIVED_DATA: ${{ github.workspace }}/DerivedData
+      BUILD_DIR: ${{ github.workspace }}/build-output
 
     steps:
       - name: Checkout repository
@@ -44,11 +43,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf build-src
-          mkdir -p build-src
+          rm -rf build-src "$BUILD_DIR"
+          mkdir -p build-src "$BUILD_DIR"
           unzip -q "$PROJECT_ZIP" -d build-src
+
           test -d "$PROJECT_FILE" || {
             echo "Xcode project not found at: $PROJECT_FILE"
+            echo "Extracted files:"
             find build-src -maxdepth 4 -print
             exit 1
           }
@@ -62,30 +63,48 @@ jobs:
       - name: Build for iOS Simulator
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
+
           xcodebuild \
             -project "$PROJECT_FILE" \
             -target "$TARGET_NAME" \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$DERIVED_DATA" \
+            CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build | tee xcodebuild.log
+            build 2>&1 | tee xcodebuild.log
 
-      - name: Collect app
+      - name: Verify built app
         if: success()
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$(find "$DERIVED_DATA/Build/Products" -type d -name 'SiteMediaScanner.app' -print -quit)"
-          test -n "$APP_PATH" || {
-            echo "Built .app was not found."
+
+          APP_PATH="$BUILD_DIR/SiteMediaScanner.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Expected app not found at: $APP_PATH"
+            echo "Build output:"
+            find "$BUILD_DIR" -maxdepth 3 -print || true
             exit 1
-          }
+          fi
+
+          echo "Built app: $APP_PATH"
+
+      - name: Package simulator app
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
           mkdir -p artifacts
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" artifacts/SiteMediaScanner-Simulator.zip
+          ditto \
+            -c -k \
+            --sequesterRsrc \
+            --keepParent \
+            "$BUILD_DIR/SiteMediaScanner.app" \
+            artifacts/SiteMediaScanner-Simulator.zip
 
       - name: Upload build artifact
         if: success()
