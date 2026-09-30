@@ -1,4 +1,4 @@
-name: Build iOS App
+name: Build iOS IPA
 
 on:
   workflow_dispatch:
@@ -6,14 +6,13 @@ on:
     branches:
       - main
       - master
-  pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build SiteMediaScanner
+    name: Build SiteMediaScanner IPA
     runs-on: macos-latest
     timeout-minutes: 30
 
@@ -43,13 +42,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf build-src "$BUILD_DIR"
+          rm -rf build-src "$BUILD_DIR" Payload
           mkdir -p build-src "$BUILD_DIR"
           unzip -q "$PROJECT_ZIP" -d build-src
 
           test -d "$PROJECT_FILE" || {
             echo "Xcode project not found at: $PROJECT_FILE"
-            echo "Extracted files:"
             find build-src -maxdepth 4 -print
             exit 1
           }
@@ -60,7 +58,7 @@ jobs:
           set -euo pipefail
           xcodebuild -list -project "$PROJECT_FILE"
 
-      - name: Build for iOS Simulator
+      - name: Build for iPhone device
         shell: bash
         run: |
           set -o pipefail
@@ -68,51 +66,53 @@ jobs:
           xcodebuild \
             -project "$PROJECT_FILE" \
             -target "$TARGET_NAME" \
-            -configuration Debug \
-            -sdk iphonesimulator \
+            -configuration Release \
+            -sdk iphoneos \
             CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build 2>&1 | tee xcodebuild.log
 
-      - name: Verify built app
-        if: success()
+      - name: Create unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
 
           APP_PATH="$BUILD_DIR/SiteMediaScanner.app"
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "Expected app not found at: $APP_PATH"
-            echo "Build output:"
+          test -d "$APP_PATH" || {
+            echo "Built app not found at: $APP_PATH"
             find "$BUILD_DIR" -maxdepth 3 -print || true
             exit 1
-          fi
+          }
 
-          echo "Built app: $APP_PATH"
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
 
-      - name: Package simulator app
-        if: success()
+          /usr/bin/zip -qry SiteMediaScanner-unsigned.ipa Payload
+
+          test -f SiteMediaScanner-unsigned.ipa
+          ls -lh SiteMediaScanner-unsigned.ipa
+
+      - name: Create release tag
+        id: release
+        shell: bash
+        run: |
+          echo "tag=build-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish IPA to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p artifacts
-          ditto \
-            -c -k \
-            --sequesterRsrc \
-            --keepParent \
-            "$BUILD_DIR/SiteMediaScanner.app" \
-            artifacts/SiteMediaScanner-Simulator.zip
-
-      - name: Upload build artifact
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: SiteMediaScanner-iOS-Simulator
-          path: artifacts/SiteMediaScanner-Simulator.zip
-          if-no-files-found: error
+          gh release create "$TAG" \
+            SiteMediaScanner-unsigned.ipa \
+            --title "SiteMediaScanner $TAG" \
+            --notes "Automated unsigned iOS build from GitHub Actions."
 
       - name: Upload build log on failure
         if: failure()
