@@ -1,0 +1,150 @@
+name: Build Sayl IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-ipa.yml"
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Find and extract project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name '*.zip' | head -n 1)"
+
+          if [ -z "${ZIP_FILE:-}" ]; then
+            echo "::error::No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+          mkdir -p extracted
+          ditto -x -k "$ZIP_FILE" extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 3 -type d | head -100
+
+      - name: Locate Xcode project
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="$(find extracted -type d -name '*.xcodeproj' | head -n 1)"
+
+          if [ -z "${PROJECT:-}" ]; then
+            echo "::error::No .xcodeproj found inside ZIP."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT")"
+          PROJECT_NAME="$(basename "$PROJECT")"
+
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "Found project: $PROJECT"
+
+      - name: Detect scheme
+        id: scheme
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.locate.outputs.project }}"
+
+          # Prefer Sayl if it exists; otherwise use the first scheme Xcode reports.
+          SCHEMES="$(xcodebuild -project "$PROJECT" -list -json | python3 -c \
+            'import json,sys; d=json.load(sys.stdin); print("\n".join(d.get("project",{}).get("schemes",[])))')"
+
+          echo "Available schemes:"
+          echo "$SCHEMES"
+
+          if echo "$SCHEMES" | grep -Fxq "Sayl"; then
+            SCHEME="Sayl"
+          else
+            SCHEME="$(echo "$SCHEMES" | sed '/^[[:space:]]*$/d' | head -n 1)"
+          fi
+
+          if [ -z "${SCHEME:-}" ]; then
+            echo "::error::No shared/buildable Xcode scheme found."
+            exit 1
+          fi
+
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Using scheme: $SCHEME"
+
+      # This produces an unsigned IPA suitable as a build artifact.
+      # For direct installation on a physical iPhone, Apple signing/provisioning
+      # must be added (certificate + provisioning profile).
+      - name: Build unsigned iOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.locate.outputs.project }}"
+          SCHEME="${{ steps.scheme.outputs.scheme }}"
+
+          rm -rf build Payload Sayl.ipa
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Create IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(find "$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos" \
+            -maxdepth 1 -type d -name '*.app' | head -n 1)"
+
+          if [ -z "${APP:-}" ]; then
+            echo "::error::.app was not produced."
+            find "$GITHUB_WORKSPACE/build" -maxdepth 6 -type d -name '*.app' || true
+            exit 1
+          fi
+
+          echo "Packaging: $APP"
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+
+          /usr/bin/zip -qry Sayl.ipa Payload
+
+          echo "IPA created:"
+          ls -lh Sayl.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sayl-IPA
+          path: Sayl.ipa
+          if-no-files-found: error
+          retention-days: 30
